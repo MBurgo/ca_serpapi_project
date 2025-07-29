@@ -1,16 +1,11 @@
-# ---------- core app ----------
 streamlit==1.34.0
 openai>=1.23.0
 pandas==2.2.2
-
-# ---------- Google Sheets ----------
 gspread==6.1.2
 google-auth==2.30.0
 google-auth-oauthlib==1.2.0
-
-# ---------- scraping / HTTP ----------
+google-search-results==2.4.2
 httpx==0.27.0
 beautifulsoup4==4.12.3
-google-search-results==2.4.2    # SerpAPI
-pytrends==4.10.0                 # latest available on PyPI
+pytrends==4.10.0
 pytz==2024.1
