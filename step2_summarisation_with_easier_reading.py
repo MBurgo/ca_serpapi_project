@@ -1,3 +1,8 @@
+"""
+Summarise Canadian data into 5 journalist briefs and store it.
+Writes to 'Summaries CA' and reads only CA‑suffixed tabs.
+"""
+
 import streamlit as st
 import openai
 import gspread
@@ -7,176 +12,103 @@ import datetime as dt
 import pytz
 from google.oauth2.service_account import Credentials
 
-# Define the scope for Google Sheets
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+TAB_SUFFIX = " CA"                    # must match engine suffix
 
-# Load the service account info from Streamlit secrets
+# ---------- Google Sheets client ----------
+scope = [
+    "https://spreadsheets.google.com/feeds",
+    "https://www.googleapis.com/auth/drive",
+]
 creds_dict = st.secrets["service_account"]
 creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
 client = gspread.authorize(creds)
 
-# Spreadsheet ID remains the same (update if needed)
-spreadsheet_id = "1BzTJgX7OgaA0QNfzKs5AgAx2rvZZjDdorgAz0SD9NZg"
-sheet = client.open_by_key(spreadsheet_id)
+SPREADSHEET_ID = "1BzTJgX7OgaA0QNfzKs5AgAx2rvZZjDdorgAz0SD9NZg"
+sheet = client.open_by_key(SPREADSHEET_ID)
 
-# Set your OpenAI API key from Streamlit secrets
 openai.api_key = st.secrets["openai"]["api_key"]
 
+# ---------- helper ----------
+def ensure_ws(title: str):
+    try:
+        return sheet.worksheet(title)
+    except gspread.exceptions.WorksheetNotFound:
+        return sheet.add_worksheet(title, rows="100", cols="20")
 
-def read_data(sheet, title):
-    """Reads data from a specified Google Sheet worksheet into a pandas DataFrame."""
-    worksheet = sheet.worksheet(title)
-    data = worksheet.get_all_records()
-    return pd.DataFrame(data)
+# ---------- data pull ----------
+def read_data(title):
+    """Returns a pandas DF from the given CA worksheet."""
+    ws = ensure_ws(title)
+    return pd.DataFrame(ws.get_all_records())
 
+# ---------- formatting ----------
+def format_data_for_prompt(news_df, top_df, rising_df, top_tr_df):
+    out = "Google News Data (Canada):\n"
+    for _, r in news_df.iterrows():
+        out += f"- Title: {r['Title']}, Link: {r['Link']}, Snippet: {r['Snippet']}\n"
 
-def format_data_for_prompt(news_data, top_stories_data, rising_data, top_data):
-    """
-    Formats data from four different sources (news, top stories, trends rising, trends top)
-    into a single string for the prompt.
-    """
-    formatted_data = "Google News Data:\n"
-    for index, row in news_data.iterrows():
-        formatted_data += f"- Title: {row['Title']}, Link: {row['Link']}, Snippet: {row['Snippet']}\n"
+    out += "\nTop Stories Data (Canada):\n"
+    for _, r in top_df.iterrows():
+        out += f"- Title: {r['Title']}, Link: {r['Link']}, Snippet: {r['Snippet']}\n"
 
-    formatted_data += "\nTop Stories Data:\n"
-    for index, row in top_stories_data.iterrows():
-        formatted_data += f"- Title: {row['Title']}, Link: {row['Link']}, Snippet: {row['Snippet']}\n"
+    out += "\nGoogle Trends Rising:\n"
+    for _, r in rising_df.iterrows():
+        out += f"- Query: {r['Query']}, Value: {r['Value']}\n"
 
-    formatted_data += "\nGoogle Trends Rising Data:\n"
-    for index, row in rising_data.iterrows():
-        formatted_data += f"- Query: {row['Query']}, Value: {row['Value']}\n"
+    out += "\nGoogle Trends Top:\n"
+    for _, r in top_tr_df.iterrows():
+        out += f"- Query: {r['Query']}, Value: {r['Value']}\n"
 
-    formatted_data += "\nGoogle Trends Top Data:\n"
-    for index, row in top_data.iterrows():
-        formatted_data += f"- Query: {row['Query']}, Value: {row['Value']}\n"
+    return out
 
-    return formatted_data
-
-
-def summarize_data(formatted_data):
-    """
-    Summarize data using the o1-mini model with a single 'user' role message.
-    We combine system-like instructions and user instructions into a single prompt.
-    """
-    # >>> CHANGE: Use local time for the date in the summary <<<
-    local_tz = pytz.timezone("Australia/Sydney")  # or any other desired timezone
-    now_local = dt.datetime.now(local_tz)
-    current_date = now_local.strftime("%Y-%m-%d")
-
-    # System-like context for the prompt
-    system_like_context = (
-        "You are a seasoned financial news editor for an Australian financial news publisher. "
-        "Your responsibilities include analyzing financial data and news sources to identify "
-        "key trends, notable events, and opportunities for in-depth reporting. "
-        "You provide insightful summaries and detailed briefs to help financial journalists "
-        "craft stories that inform and engage retail investors and industry professionals. "
-        "Your communication style is clear, concise, and analytical, with a focus on accuracy "
-        "and relevance. You use industry-specific terminology appropriately and maintain an "
-        "objective tone.\n\n"
-    )
-
-    # Instructions for the summarization
-    instructions = (
-        f"As a news editor for an Australian financial news publisher, your task is to analyze "
-        f"and summarize the latest data from various sources related to the Australian stock market. "
-        f"Your goal is to identify key trends, recurring themes, and interesting opportunities for "
-        f"our financial journalists to cover.\n\n"
-        f"Using the provided data, please perform the following tasks:\n"
-        f"1. Analyze the \"Google Trends Rising\" data to identify the top 10 rising search queries, "
-        f"paying special attention to high-volume queries and those marked as 'Breakout'.\n"
-        f"2. Analyze the \"Google Trends Top\" data to identify the top search queries.\n"
-        f"3. Review the articles from \"Google News\" to identify recurring themes and notable entities.\n"
-        f"4. Review the articles from \"Top Stories\" for the query \"ASX 200\" to identify significant news stories.\n\n"
-        f"Please include the following sections in your report using plain text with single asterisks (*) for bold text. "
-        f"Use lines of hyphens (\"-\" repeated) to create horizontal lines as separators before and after major sections "
-        f"and brief titles. Do not use Markdown headers or `###`.\n\n"
-        f"Include the date of summarization ({current_date}) in your report.\n\n"
-        f"The report should have the following structure:\n\n"
-        f"--------------------------------------------------\n"
-        f"*Summary of Findings [{current_date}]*\n"
-        f"--------------------------------------------------\n"
-        f"*Google Trends Insights*: List the top 10 trends from the \"Google Trends Rising\" data, along with their volumes.\n\n"
-        f"*Key Trends & Recurring Themes*: Identify the top 5 trends with brief descriptions and their volumes.\n\n"
-        f"*Notable Entities*: List key companies, institutions, and market insights discussed in the data.\n\n"
-        f"--------------------------------------------------\n"
-        f"*5 Detailed Briefs for Journalists*\n"
-        f"--------------------------------------------------\n\n"
-        f"For each brief, use the following structure, separated by horizontal lines:\n\n"
-        f"--------------------------------------------------\n"
-        f"*Brief Title*\n"
-        f"--------------------------------------------------\n"
-        f"1. *Synopsis*: Brief summary of the findings.\n"
-        f"2. *Key Themes*: Main themes identified in the data.\n"
-        f"3. *Entities*: Relevant companies, indexes, or key individuals.\n"
-        f"4. *Source Insights*: Data sources these insights come from.\n"
-        f"5. *Suggested Angles*: Recommended angles for journalists to pursue.\n\n"
-        f"Include emojis at the beginning of important sections to visually highlight them. "
-        f"Do not use Markdown headers or `###`.\n"
-    )
-
-    # Combine context, instructions, and data into one user prompt
-    big_prompt = (
-        f"{system_like_context}"
-        f"{instructions}\n"
-        f"Here is the data to analyze:\n\n"
-        f"{formatted_data}"
-    )
-
-    messages = [
-        {
-            "role": "user",
-            "content": big_prompt
-        }
-    ]
-
-    # Call the OpenAI API
+# ---------- model ----------
+def summarize_data(big_prompt):
+    """Calls GPT‑4o to create the summary briefs."""
     response = openai.ChatCompletion.create(
         model="gpt-4o",
-        messages=messages
+        messages=[{"role": "user", "content": big_prompt}],
     )
-    summary = response['choices'][0]['message']['content']
-    return summary
+    return response["choices"][0]["message"]["content"]
 
+# ---------- store summary ----------
+def store_summary(summary_text):
+    ws = ensure_ws(f"Summaries{TAB_SUFFIX}")
+    ws.append_row([summary_text])
+    time.sleep(1)
 
-def store_summary_in_google_sheets(sheet, summary):
-    """Stores the summary data in a 'Summaries' worksheet, appending a row."""
-    summary_sheet = sheet.worksheet("Summaries")
-    summary_sheet.append_row([summary])
-    time.sleep(1)  # Delay to prevent exceeding quota
-
-
+# ---------- main callable ----------
 def generate_summary():
-    """
-    Pulls data from Google Sheets, summarizes using the AI model,
-    stores the summary in the 'Summaries' worksheet, and returns it.
-    """
-    # Read data from relevant worksheets
-    news_data = read_data(sheet, "Google News")
-    top_stories_data = read_data(sheet, "Top Stories")
-    rising_data = read_data(sheet, "Google Trends Rising")
-    top_data = read_data(sheet, "Google Trends Top")
+    news   = read_data(f"Google News{TAB_SUFFIX}")
+    top    = read_data(f"Top Stories{TAB_SUFFIX}")
+    rising = read_data(f"Google Trends Rising{TAB_SUFFIX}")
+    top_tr = read_data(f"Google Trends Top{TAB_SUFFIX}")
 
-    # Format all data into a single string
-    formatted_data = format_data_for_prompt(news_data, top_stories_data, rising_data, top_data)
+    prompt_data = format_data_for_prompt(news, top, rising, top_tr)
 
-    # Generate summary via OpenAI
-    summary = summarize_data(formatted_data)
+    local_tz = pytz.timezone("America/Toronto")
+    today = dt.datetime.now(local_tz).strftime("%Y-%m-%d")
 
-    # Store the summary in "Summaries" worksheet
-    store_summary_in_google_sheets(sheet, summary)
+    instructions = (
+        "You are a seasoned financial news editor for a Canadian publisher focused on TSX‑listed stocks. "
+        "Identify key trends and draft 5 detailed briefs for journalists.\n\n"
+        "--------------------------------------------------\n"
+        f"*Summary of Findings [{today}]*\n"
+        "--------------------------------------------------\n"
+        "*Google Trends Insights*: List the top 10 rising queries.\n\n"
+        "*Key Trends & Recurring Themes*: Top 5 themes.\n\n"
+        "*Notable Entities*: Companies, sectors, indexes.\n\n"
+        "--------------------------------------------------\n"
+        "*5 Detailed Briefs for Journalists*\n"
+        "--------------------------------------------------\n"
+        "For each brief include Synopsis, Key Themes, Entities, Source Insights, Suggested Angles.\n"
+        "Use single asterisks for bold and separator lines of hyphens. Add emojis to section headers."
+    )
 
-    # Return the summary text so we can display it in Streamlit
+    summary = summarize_data(f"{instructions}\n\nHere is the data:\n{prompt_data}")
+    store_summary(summary)
+
     return summary
 
-
-def main():
-    """
-    Original main function to allow command-line usage.
-    It just calls generate_summary() but doesn't return anything.
-    """
-    generate_summary()
-
-
+# ---------- CLI entry ----------
 if __name__ == "__main__":
-    main()
+    generate_summary()
