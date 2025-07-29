@@ -69,7 +69,7 @@ def format_data_for_prompt(news_df, top_df, rising_df, top_tr_df) -> str:
 def summarize_data(big_prompt: str) -> str:
     """Generate the briefing summary with GPT‑4o via the new v1 client."""
     response = client_oa.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4.1",
         messages=[{"role": "user", "content": big_prompt}],
     )
     return response.choices[0].message.content
