@@ -1,12 +1,10 @@
 """
-data_retrieval_storage_news_engine.py
-------------------------------------
-Phase 1 refactor – v1.2 (10 Jul 2025)
+data_retrieval_storage_news_engine_ca.py
+----------------------------------------
+Canada‑only fork of AU v1.2  (31 Jul 2025)
 
-• Batch write, async meta fetch, duplicate cap
-• Browser‑UA header to reduce HTTP 403 on meta fetch
-• Fallback to SerpAPI snippet if meta unavailable
-• Deprecation warnings resolved
+• Uses TSX Composite queries & CA geo settings
+• Writes to CA‑suffixed worksheets so AU data is never touched
 """
 
 # ---------- stdlib ----------
@@ -25,12 +23,14 @@ from pytrends.exceptions import TooManyRequestsError
 from serpapi import GoogleSearch
 
 # ---------------------------------------------------------------------
-# CONFIG – tweak here
+# CONFIG
 # ---------------------------------------------------------------------
-CAP_NEWS         = 40   # max unique rows kept in “Google News”
-CAP_TOP_STORIES  = 40   # max rows kept in “Top Stories”
-CAP_TRENDS       = 20   # max rows in each Trends sheet
-DEBUG_COUNTS     = False  # True prints raw vs. deduped counts
+CAP_NEWS        = 40
+CAP_TOP_STORIES = 40
+CAP_TRENDS      = 20
+DEBUG_COUNTS    = False
+
+TAB_SUFFIX = " CA"                       # <— single leading space then “CA”
 
 BROWSER_HEADERS = {
     "User-Agent": (
@@ -38,7 +38,7 @@ BROWSER_HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/126.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Language": "en-CA,en;q=0.9",
 }
 
 # ---------------------------------------------------------------------
@@ -53,25 +53,26 @@ creds_dict = st.secrets["service_account"]
 creds      = Credentials.from_service_account_info(creds_dict, scopes=SCOPE)
 client     = gspread.authorize(creds)
 
+# 👉 Replace with your shared workbook ID (or keep the AU ID if you prefer)
 SPREADSHEET_ID = "1BzTJgX7OgaA0QNfzKs5AgAx2rvZZjDdorgAz0SD9NZg"
 sheet          = client.open_by_key(SPREADSHEET_ID)
 
 SERP_API_KEY = st.secrets["serpapi"]["api_key"]
 
 # ---------------------------------------------------------------------
-# 2  SerpAPI fetch helpers
+# 2  SerpAPI fetch helpers – Canada settings
 # ---------------------------------------------------------------------
 def fetch_google_news() -> List[dict]:
     params = {
         "api_key": SERP_API_KEY,
         "engine": "google",
         "no_cache": "true",
-        "q": "asx 200",
-        "google_domain": "google.com.au",
+        "q": "tsx today",
+        "google_domain": "google.ca",
         "tbs": "qdr:d",
-        "gl": "au",
+        "gl": "ca",
         "hl": "en",
-        "location": "Australia",
+        "location": "Canada",
         "tbm": "nws",
         "num": "40",
     }
@@ -81,9 +82,9 @@ def fetch_google_news() -> List[dict]:
 def fetch_google_top_stories() -> List[dict]:
     params = {
         "api_key": SERP_API_KEY,
-        "q": "asx+200",
+        "q": "tsx+today",
         "hl": "en",
-        "gl": "au",
+        "gl": "ca",
     }
     return GoogleSearch(params).get_dict().get("top_stories", [])
 
@@ -92,10 +93,10 @@ def fetch_google_trends():
     params = {
         "api_key": SERP_API_KEY,
         "engine": "google_trends",
-        "q": "/m/0bl5c2",
-        "geo": "AU",
+        "q": "/m/09qwc",          # S&P/TSX Composite Index topic‑ID
+        "geo": "CA",
         "data_type": "RELATED_QUERIES",
-        "tz": "-600",
+        "tz": "-300",             # Eastern Std Time (UTC‑5). Use -240 for EDT.
         "date": "now 4-H",
     }
 
@@ -103,9 +104,8 @@ def fetch_google_trends():
     while attempts < 5:
         try:
             results = GoogleSearch(params).get_dict()
-            rising = results.get("related_queries", {}).get("rising", [])
-            top    = results.get("related_queries", {}).get("top",    [])
-            return rising, top
+            rel = results.get("related_queries", {})
+            return rel.get("rising", []), rel.get("top", [])
         except TooManyRequestsError:
             wait = (2 ** attempts) * 10
             print(f"Google Trends rate‑limited – sleeping {wait}s")
@@ -114,7 +114,7 @@ def fetch_google_trends():
     raise RuntimeError("Google Trends fetch failed after multiple attempts.")
 
 # ---------------------------------------------------------------------
-# 3  Worksheet utilities
+# 3  Worksheet helpers
 # ---------------------------------------------------------------------
 def ensure_worksheet_exists(sheet_obj, title: str):
     try:
@@ -132,7 +132,7 @@ def overwrite_worksheet(ws, header: List[str], rows: List[List]):
     )
 
 # ---------------------------------------------------------------------
-# 4  Data hygiene helpers
+# 4  Dedup helper
 # ---------------------------------------------------------------------
 def dedupe_rows(rows: List[List], key_index: int, keep_n: int) -> List[List]:
     seen, out = set(), []
@@ -146,7 +146,7 @@ def dedupe_rows(rows: List[List], key_index: int, keep_n: int) -> List[List]:
     return out
 
 # ---------------------------------------------------------------------
-# 5  Concurrent meta‑description fetch
+# 5  Async meta‑description fetch (unchanged)
 # ---------------------------------------------------------------------
 async def _grab_desc(session: httpx.AsyncClient, url: str) -> str:
     if not url or not url.startswith("http"):
@@ -174,9 +174,10 @@ async def fetch_meta_descriptions(urls: List[str], limit: int = 10) -> List[str]
         return await asyncio.gather(*(bound(u) for u in urls))
 
 # ---------------------------------------------------------------------
-# 6  Storage orchestrator
+# 6  Storage orchestrator – writes to CA tabs
 # ---------------------------------------------------------------------
 def store_data_in_google_sheets(news_data, top_stories_data, rising_data, top_data):
+
     # ---------- Google News ----------
     news_rows = [
         [a.get("title") or "No Title",
@@ -184,22 +185,17 @@ def store_data_in_google_sheets(news_data, top_stories_data, rising_data, top_da
          a.get("snippet") or "No Snippet"]
         for a in news_data
     ]
-    if DEBUG_COUNTS:
-        print(f"Google News – raw: {len(news_rows)}, unique links: {len({r[1] for r in news_rows})}")
-
     news_rows = dedupe_rows(news_rows, key_index=1, keep_n=CAP_NEWS)
-    snippet_lookup_news = {r[1]: r[2] for r in news_rows}  # link -> snippet
+    snippet_lookup_news = {r[1]: r[2] for r in news_rows}
 
     news_meta = asyncio.run(fetch_meta_descriptions([r[1] for r in news_rows]))
     for row, meta in zip(news_rows, news_meta):
-        # append fetched meta or placeholder
         row.append(meta if meta else "No Meta Description")
-        # fallback to snippet if meta fetch failed
-        if meta.startswith("HTTP") or meta.startswith("Error"):
+        if meta.startswith(("HTTP", "Error")):
             row[-1] = snippet_lookup_news.get(row[1], "No Meta Description")
 
     overwrite_worksheet(
-        ensure_worksheet_exists(sheet, "Google News"),
+        ensure_worksheet_exists(sheet, f"Google News{TAB_SUFFIX}"),
         ["Title", "Link", "Snippet", "Meta Description"],
         news_rows,
     )
@@ -211,20 +207,17 @@ def store_data_in_google_sheets(news_data, top_stories_data, rising_data, top_da
          s.get("snippet") or "No Snippet"]
         for s in top_stories_data
     ]
-    if DEBUG_COUNTS:
-        print(f"Top Stories – raw: {len(top_rows)}")
-
     top_rows = dedupe_rows(top_rows, key_index=1, keep_n=CAP_TOP_STORIES)
     snippet_lookup_top = {r[1]: r[2] for r in top_rows}
 
     top_meta = asyncio.run(fetch_meta_descriptions([r[1] for r in top_rows]))
     for row, meta in zip(top_rows, top_meta):
         row.append(meta if meta else "No Meta Description")
-        if meta.startswith("HTTP") or meta.startswith("Error"):
+        if meta.startswith(("HTTP", "Error")):
             row[-1] = snippet_lookup_top.get(row[1], "No Meta Description")
 
     overwrite_worksheet(
-        ensure_worksheet_exists(sheet, "Top Stories"),
+        ensure_worksheet_exists(sheet, f"Top Stories{TAB_SUFFIX}"),
         ["Title", "Link", "Snippet", "Meta Description"],
         top_rows,
     )
@@ -232,7 +225,7 @@ def store_data_in_google_sheets(news_data, top_stories_data, rising_data, top_da
     # ---------- Google Trends Rising ----------
     rising_rows = [[q.get("query"), q.get("value")] for q in rising_data][:CAP_TRENDS]
     overwrite_worksheet(
-        ensure_worksheet_exists(sheet, "Google Trends Rising"),
+        ensure_worksheet_exists(sheet, f"Google Trends Rising{TAB_SUFFIX}"),
         ["Query", "Value"],
         rising_rows,
     )
@@ -240,7 +233,7 @@ def store_data_in_google_sheets(news_data, top_stories_data, rising_data, top_da
     # ---------- Google Trends Top ----------
     top_rows_q = [[q.get("query"), q.get("value")] for q in top_data][:CAP_TRENDS]
     overwrite_worksheet(
-        ensure_worksheet_exists(sheet, "Google Trends Top"),
+        ensure_worksheet_exists(sheet, f"Google Trends Top{TAB_SUFFIX}"),
         ["Query", "Value"],
         top_rows_q,
     )
@@ -250,14 +243,14 @@ def store_data_in_google_sheets(news_data, top_stories_data, rising_data, top_da
 # ---------------------------------------------------------------------
 def main():
     now_utc = dt.datetime.now(dt.UTC)
-    print(f"=== Data scrape started {now_utc.isoformat(timespec='seconds')}Z ===")
+    print(f"=== CA scrape started {now_utc:%Y-%m-%d %H:%M:%S}Z ===")
 
-    news_data        = fetch_google_news()
-    top_stories_data = fetch_google_top_stories()
-    rising_data, top_data = fetch_google_trends()
+    news = fetch_google_news()
+    tops = fetch_google_top_stories()
+    rising, top = fetch_google_trends()
 
-    store_data_in_google_sheets(news_data, top_stories_data, rising_data, top_data)
-    print("=== Data scrape finished ===")
+    store_data_in_google_sheets(news, tops, rising, top)
+    print("=== CA scrape finished ===")
 
 
 if __name__ == "__main__":
