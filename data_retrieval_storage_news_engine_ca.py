@@ -67,7 +67,7 @@ def fetch_google_news() -> List[dict]:
         "api_key": SERP_API_KEY,
         "engine": "google",
         "no_cache": "true",
-        "q": "tsx today",
+        "q": "tsx composite",
         "google_domain": "google.ca",
         "tbs": "qdr:d",
         "gl": "ca",
@@ -82,7 +82,7 @@ def fetch_google_news() -> List[dict]:
 def fetch_google_top_stories() -> List[dict]:
     params = {
         "api_key": SERP_API_KEY,
-        "q": "tsx+today",
+        "q": "tsx+composite",
         "hl": "en",
         "gl": "ca",
     }
@@ -93,7 +93,7 @@ def fetch_google_trends():
     params = {
         "api_key": SERP_API_KEY,
         "engine": "google_trends",
-        "q": "/m/09qwc",          # S&P/TSX Composite Index topic‑ID
+        "q": "/m/01d4qg",          # S&P/TSX Composite Index topic‑ID
         "geo": "CA",
         "data_type": "RELATED_QUERIES",
         "tz": "-300",             # Eastern Std Time (UTC‑5). Use -240 for EDT.
