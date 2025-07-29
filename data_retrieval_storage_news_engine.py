@@ -155,7 +155,7 @@ async def _grab_desc(session: httpx.AsyncClient, url: str) -> str:
         r = await session.get(url, timeout=10, headers=BROWSER_HEADERS)
         if r.status_code != 200:
             return f"HTTP {r.status_code}"
-        soup = BeautifulSoup(r.content, "lxml")
+        soup = BeautifulSoup(r.content, "html.parser")   # pure‑python parser – no lxml wheel required
         tag  = soup.find("meta", attrs={"name": "description"})
         return (
             tag["content"].strip()
